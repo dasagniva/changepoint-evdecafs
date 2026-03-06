@@ -1,0 +1,121 @@
+# =============================================================================
+# EV-DeCAFS Hyperparameters
+# All algorithm parameters are centralised here.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Phase I: EV-DeCAFS Detection
+# -----------------------------------------------------------------------------
+phase1:
+  # Base penalty for the DeCAFS cost function (alpha_0 in the paper)
+  alpha_0: 10.0
+
+  # Precision of the level process: lambda = 1 / sigma_eta^2
+  # (overridden at runtime if sigma_eta is estimated from data)
+  lambda_param: 1.0
+
+  # Initial AR(1) autocorrelation (overridden by Yule-Walker estimate)
+  phi_init: 0.5
+
+  # Half-width of the local window used to compute the EVI field
+  # W_t spans [t - w, t + w], so 2w+1 points are used
+  window_halfwidth_w: 50
+
+  # Sensitivity multiplier for the EVT adaptive penalty
+  # alpha_t = alpha_0 * (1 + lambda_ev * max(xi_t, 0))
+  evt_sensitivity_lambda_ev: 1.0
+
+  # Quantile used to threshold local deviations before GPD fit
+  gpd_percentile_q0: 0.90
+
+  # Multiplier for exceedance-count penalty variant
+  # alpha_t = alpha_0 * (1 + E_t / (2w+1)) * c
+  exceedance_multiplier_c: 2.5
+
+# -----------------------------------------------------------------------------
+# Phase I → Phase II: Labelling
+# -----------------------------------------------------------------------------
+labelling:
+  # Percentile of |delta_mu| used to set the kappa_mu threshold
+  kappa_mu_percentile: 75
+
+  # Minimum persistence score for a changepoint to be labelled 'sustained'
+  kappa_S: 0.5
+
+  # Half-width of the feature extraction window (D_minus, D_plus)
+  window_L: 5
+
+  # Persistence tolerance epsilon: set to median(|y - mu_hat|) over training
+  # (computed at runtime; placeholder value below)
+  epsilon_persistence: null
+
+# -----------------------------------------------------------------------------
+# Phase II: FPNN
+# -----------------------------------------------------------------------------
+fpnn:
+  # Number of Fourier harmonics (spectral resolution)
+  J_harmonics: 10
+
+  # MinMax scaling range for features before Fourier expansion
+  scaling_range: [-0.5, 0.5]
+
+# -----------------------------------------------------------------------------
+# Phase II: SMOTE
+# -----------------------------------------------------------------------------
+smote:
+  k_neighbors: 5
+  random_state: 42
+
+# -----------------------------------------------------------------------------
+# Phase II: Baselines
+# -----------------------------------------------------------------------------
+baselines:
+  # Logistic Regression regularisation grid (searched via cross-validation)
+  lr_C_range: [0.01, 0.1, 1, 10]
+
+  # Isolation Forest contamination ('auto' = sklearn default)
+  if_contamination: "auto"
+
+  # One-Class SVM kernel
+  ocsvm_kernel: "rbf"
+
+  # Feedforward NN (MLPClassifier) architecture
+  fnn_hidden: [64, 32]
+  fnn_dropout: 0.3       # approximated via alpha regularisation in sklearn
+  fnn_epochs: 100        # maps to max_iter
+
+# -----------------------------------------------------------------------------
+# Evaluation
+# -----------------------------------------------------------------------------
+evaluation:
+  # Cost grid for MRL sensitivity analysis
+  cost_cF_grid: [1, 2, 5]
+  cost_cD_grid: [1, 3, 5, 10]
+
+  # Censoring parameters for censored MRL
+  censoring_epsilon: 1
+  censoring_Tmax_fraction: 0.2   # Tmax = censoring_Tmax_fraction * n_test
+
+  # Hausdorff tolerance: fraction of series length within which a detection
+  # is considered a 'near-miss' rather than a false positive
+  hausdorff_tolerance_fraction: 0.02
+
+# -----------------------------------------------------------------------------
+# Train/test splitting
+# -----------------------------------------------------------------------------
+splitting:
+  # Bitcoin: inclusive end date of the training period
+  bitcoin_train_end: "2022-12-31"
+
+  # Well-log: fraction of observations used for training (chronological)
+  welllog_train_fraction: 0.75
+
+# -----------------------------------------------------------------------------
+# Visualisation
+# -----------------------------------------------------------------------------
+visualization:
+  dpi: 300
+  figure_format: "pdf"   # "pdf" or "png"
+  font_size: 12
+  figsize_single: [8, 5]
+  figsize_double: [14, 5]
