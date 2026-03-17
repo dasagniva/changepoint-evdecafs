@@ -31,54 +31,126 @@ from src.visualization.sensitivity_heatmap import plot_sensitivity_heatmap
 # ---------------------------------------------------------------------------
 
 class TestComputeMrl:
+    # New API: compute_mrl(detected_cps, true_cps: array, tolerance=None)
+    # FP = detected CPs not matched to any true CP within tolerance
+    # MRL = mean delay to first detection at/after each true CP
+
     def test_perfect_detection(self):
-        r = compute_mrl(np.array([100]), true_cp=100)
+        r = compute_mrl(np.array([100]), true_cps=np.array([100]))
         assert r["FP"] == 0
         assert r["MRL"] == pytest.approx(0.0)
-        assert r["T_first"] == pytest.approx(100.0)
+        assert r["n_missed"] == 0
 
-    def test_delayed_detection(self):
-        r = compute_mrl(np.array([115]), true_cp=100)
+    def test_delayed_detection_within_tolerance(self):
+        # Detection 15 steps late; with tolerance=20 it counts as a true detection
+        r = compute_mrl(np.array([115]), true_cps=np.array([100]), tolerance=20)
         assert r["FP"] == 0
         assert r["MRL"] == pytest.approx(15.0)
 
+    def test_delayed_detection_no_tolerance_is_fp(self):
+        # With tolerance=0, a detection not at exact CP is unmatched → FP=1
+        r = compute_mrl(np.array([115]), true_cps=np.array([100]), tolerance=0)
+        assert r["FP"] == 1
+        # MRL is still computed as the delay from the true CP
+        assert r["MRL"] == pytest.approx(15.0)
+
     def test_false_positive_before_cp(self):
-        r = compute_mrl(np.array([50, 80, 100]), true_cp=100)
+        # 50 and 80 don't match true_cp=100, so FP=2; 100 matches → MRL=0
+        r = compute_mrl(np.array([50, 80, 100]), true_cps=np.array([100]))
         assert r["FP"] == 2
         assert r["MRL"] == pytest.approx(0.0)
 
     def test_missed_detection(self):
-        r = compute_mrl(np.array([50, 80]), true_cp=100)
+        # 50 and 80 don't match true_cp=100; no detection >= 100 → MRL=inf
+        r = compute_mrl(np.array([50, 80]), true_cps=np.array([100]))
         assert r["FP"] == 2
         assert r["MRL"] == np.inf
-        assert r["T_first"] == np.inf
+        assert r["n_missed"] == 1
 
     def test_empty_detections(self):
-        r = compute_mrl(np.array([]), true_cp=100)
+        r = compute_mrl(np.array([]), true_cps=np.array([100]))
         assert r["FP"] == 0
         assert r["MRL"] == np.inf
 
     def test_tolerance_window(self):
         # Detection at 103 is within tolerance=5 of true_cp=100
-        r = compute_mrl(np.array([103]), true_cp=100, tolerance=5)
+        r = compute_mrl(np.array([103]), true_cps=np.array([100]), tolerance=5)
         assert r["FP"] == 0
         assert r["MRL"] == pytest.approx(3.0)
 
     def test_tolerance_excludes_fp(self):
-        # Detection at 90 is outside tolerance=5, so it's a FP
-        r = compute_mrl(np.array([90, 105]), true_cp=100, tolerance=5)
-        assert r["FP"] == 1  # 90 < 95 = 100-5
+        # Detection at 90: |90-100|=10 > 5 → unmatched (FP)
+        # Detection at 105: |105-100|=5 <= 5 → matched; delay=5
+        r = compute_mrl(np.array([90, 105]), true_cps=np.array([100]), tolerance=5)
+        assert r["FP"] == 1
         assert r["MRL"] == pytest.approx(5.0)
 
-    def test_fp_count_only_before_cp(self):
-        # Detections after true_cp but far from it (no tolerance) → not FP
-        r = compute_mrl(np.array([100, 150, 200]), true_cp=100)
+    def test_unmatched_detections_are_fp(self):
+        # 100 matches true_cp=100; 150 and 200 are unmatched → FP=2
+        r = compute_mrl(np.array([100, 150, 200]), true_cps=np.array([100]))
+        assert r["FP"] == 2
+        assert r["MRL"] == pytest.approx(0.0)
+
+    def test_multiple_true_cps(self):
+        # Two true CPs at 50 and 150; detected at 52 and 155
+        # delays: max(52-50,0)=2, max(155-150,0)=5 → mean=3.5
+        r = compute_mrl(np.array([52, 155]), true_cps=np.array([50, 150]), tolerance=10)
+        assert r["FP"] == 0
+        assert r["n_missed"] == 0
+        assert r["MRL"] == pytest.approx((2.0 + 5.0) / 2)
+
+    def test_returns_keys(self):
+        r = compute_mrl(np.array([100]), true_cps=np.array([100]))
+        assert {"FP", "MRL", "delays", "n_missed", "n_true_cps", "n_detected"}.issubset(
+            r.keys()
+        )
+
+
+class TestBoundaryExclusion:
+    """Tests for boundary_exclusion_window in compute_mrl."""
+
+    def test_boundary_detection_excluded_from_fp(self):
+        # Detection at index 5 is within boundary window=50 → excluded from FP
+        r = compute_mrl(
+            np.array([5, 100]),
+            true_cps=np.array([100]),
+            boundary_exclusion_window=50,
+        )
+        # index 5 excluded; index 100 matches true CP → FP=0
         assert r["FP"] == 0
         assert r["MRL"] == pytest.approx(0.0)
 
-    def test_returns_keys(self):
-        r = compute_mrl(np.array([100]), true_cp=100)
-        assert set(r.keys()) == {"FP", "MRL", "T_first"}
+    def test_boundary_detection_included_without_window(self):
+        # Same scenario but no exclusion → FP=1
+        r = compute_mrl(
+            np.array([5, 100]),
+            true_cps=np.array([100]),
+            boundary_exclusion_window=0,
+        )
+        assert r["FP"] == 1
+
+    def test_boundary_window_does_not_affect_mrl(self):
+        # Boundary exclusion removes early detections from FP count only,
+        # not from MRL computation (MRL uses detected_all before exclusion)
+        r = compute_mrl(
+            np.array([5]),
+            true_cps=np.array([100]),
+            boundary_exclusion_window=50,
+        )
+        # The detection at 5 is excluded from FP; true CP at 100 has no
+        # post-CP detection so MRL=inf
+        assert r["FP"] == 0
+        assert r["MRL"] == np.inf
+
+    def test_n_detected_total_vs_n_detected(self):
+        # n_detected_total should include boundary detections; n_detected should not
+        r = compute_mrl(
+            np.array([5, 10, 100]),
+            true_cps=np.array([100]),
+            boundary_exclusion_window=50,
+        )
+        assert r["n_detected_total"] == 3
+        assert r["n_detected"] == 1  # only index 100 survives exclusion
 
 
 class TestComputeRisk:
@@ -250,7 +322,6 @@ class TestVisualizationSmoke:
             y, detected_cps=np.array([100]),
             true_cps=np.array([100]), means=means,
             title="test", save_path=tmp_path / "run.png",
-            outlier_indices=np.array([50, 150]),
         )
         assert (tmp_path / "run.png").exists()
 

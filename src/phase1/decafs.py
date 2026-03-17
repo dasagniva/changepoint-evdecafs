@@ -22,7 +22,7 @@ def ev_decafs(
     lambda_param: float,
     gamma: float,
     phi: float,
-    n_grid: int = 500,
+    n_grid: int = 1000,
 ) -> dict:
     """Run the EV-DeCAFS penalised changepoint detection algorithm.
 
@@ -90,7 +90,7 @@ def ev_decafs(
 
     # --- Forward pass ---
     # backtrack_ptr[t, i] = grid index j that was optimal at step t for current grid i
-    # int16 is sufficient because n_grid <= 500 << 32767
+    # int16 is sufficient because n_grid <= 1000 << 32767
     backtrack_ptr = np.empty((n, n_grid), dtype=np.int16)
 
     t0 = time.perf_counter()

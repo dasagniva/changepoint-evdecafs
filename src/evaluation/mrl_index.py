@@ -13,62 +13,129 @@ from src.utils.logging_config import setup_logger
 logger = setup_logger(__name__)
 
 
+def convert_to_relative(
+    true_cps_absolute: np.ndarray,
+    split_index: int,
+) -> tuple[np.ndarray, int]:
+    """Convert absolute true CP indices to test-relative coordinates.
+
+    Parameters
+    ----------
+    true_cps_absolute:
+        Array of true CP indices in the full series.
+    split_index:
+        The index where the test set begins (e.g., ``len(y_train)``).
+
+    Returns
+    -------
+    true_cps_relative:
+        Array of true CPs that fall in the test set, converted to
+        test-relative coordinates (i.e., index - split_index).
+    n_excluded:
+        Number of true CPs that fall before the split (excluded).
+    """
+    true_cps_absolute = np.asarray(true_cps_absolute)
+    mask = true_cps_absolute >= split_index
+    true_cps_relative = true_cps_absolute[mask] - split_index
+    n_excluded = int((~mask).sum())
+    return true_cps_relative, n_excluded
+
+
 def compute_mrl(
     detected_cps: np.ndarray,
-    true_cp: int | float,
+    true_cps: np.ndarray,
     tolerance: int | None = None,
+    boundary_exclusion_window: int = 0,
 ) -> dict:
-    """Compute false positives and Mean Run Length for a single changepoint.
+    """Compute false positives and Mean Run Length across multiple changepoints.
 
-    A detected changepoint is a **true detection** if it is >= ``true_cp``
-    (and within ``tolerance`` if supplied).  All detections strictly before
-    ``true_cp`` (and outside the tolerance window) are **false positives**.
+    Both ``detected_cps`` and ``true_cps`` must be in the **same coordinate
+    system** (e.g., both test-relative). Use :func:`convert_to_relative` to
+    convert absolute true CP indices before calling this function.
+
+    FP: number of detected CPs not matched to any true CP within tolerance.
+    MRL: mean detection delay across true CPs (averaging only finite delays).
 
     Parameters
     ----------
     detected_cps:
-        Array of detected changepoint indices (need not be sorted).
-    true_cp:
-        Index of the true (single) changepoint.
+        Array of detected changepoint indices (relative to eval segment).
+    true_cps:
+        Array of true CP indices (same coordinate system as detected_cps).
     tolerance:
-        If given, detections in ``[true_cp - tolerance, true_cp + tolerance]``
-        are counted as true detections rather than false positives.
+        Matching window half-width.  A detected CP within ``tolerance`` steps
+        of a true CP is considered a true detection.  Default: exact matching
+        (tolerance = 0).
+    boundary_exclusion_window:
+        Detected CPs that fall within the first ``boundary_exclusion_window``
+        observations of the evaluation segment are excluded from FP counting
+        (treated as boundary artifacts).  Default 0 (disabled).
 
     Returns
     -------
     dict with keys:
-        - ``'FP'``: int — number of false positives.
-        - ``'MRL'``: float — ``T_first - true_cp``, or ``np.inf`` if nothing
-          was detected at or after ``true_cp``.
-        - ``'T_first'``: float — index of the first true detection, or
-          ``np.inf``.
+        - ``'FP'``: int — detected CPs not matched to any true CP.
+        - ``'MRL'``: float — mean delay to first detection at/after each true CP;
+          ``np.inf`` if all true CPs are missed.
+        - ``'delays'``: list[float] — per-true-CP delay (``np.inf`` if missed).
+        - ``'n_missed'``: int — number of true CPs with no nearby detection.
+        - ``'n_true_cps'``: int — total number of true CPs.
+        - ``'n_detected'``: int — total number of detected CPs.
     """
-    detected_cps = np.asarray(detected_cps, dtype=float)
-    true_cp = float(true_cp)
+    tol = float(tolerance) if tolerance is not None else 0.0
+    detected_all = np.sort(np.asarray(detected_cps, dtype=float))
+    true = np.sort(np.asarray(true_cps, dtype=float))
 
-    if tolerance is not None:
-        tol = float(tolerance)
-        lo = true_cp - tol
-        hi = true_cp + tol
-        true_detections = detected_cps[(detected_cps >= lo) & (detected_cps <= hi)]
+    # --- Boundary exclusion: remove detections near the start of the segment ---
+    if boundary_exclusion_window > 0:
+        boundary_mask = detected_all < boundary_exclusion_window
+        n_excluded_boundary = int(boundary_mask.sum())
+        if n_excluded_boundary > 0:
+            logger.debug(
+                "Boundary exclusion: %d detection(s) within first %d obs "
+                "excluded from FP counting.",
+                n_excluded_boundary, boundary_exclusion_window,
+            )
+        detected = detected_all[~boundary_mask]
     else:
-        lo = true_cp
-        # No upper limit: any detection at or after true_cp counts
-        true_detections = detected_cps[detected_cps >= lo]
+        detected = detected_all
 
-    # False positives: detected before the (tolerance-adjusted) lower bound
-    fp_mask = detected_cps < lo
-    FP = int(fp_mask.sum())
+    # --- False Positives: detected CPs not near any true CP ---
+    matched_detected: set[int] = set()
+    for tcp in true:
+        for i, dcp in enumerate(detected):
+            if abs(dcp - tcp) <= tol:
+                matched_detected.add(i)
+                break  # each true CP matches at most one detected CP
+    FP = len(detected) - len(matched_detected)
 
-    if len(true_detections) > 0:
-        T_first = float(true_detections.min())
-        MRL = T_first - true_cp
-    else:
-        T_first = np.inf
-        MRL = np.inf
+    # --- MRL: per true CP, delay to first detection at or after ---
+    delays: list[float] = []
+    for tcp in true:
+        post = detected[detected >= tcp - tol]
+        if len(post) > 0:
+            delay = float(post[0] - tcp)
+            delays.append(max(delay, 0.0))
+        else:
+            delays.append(np.inf)
 
-    logger.debug("MRL — FP=%d, MRL=%s, T_first=%s", FP, MRL, T_first)
-    return {"FP": FP, "MRL": MRL, "T_first": T_first}
+    finite_delays = [d for d in delays if np.isfinite(d)]
+    MRL = float(np.mean(finite_delays)) if finite_delays else np.inf
+    n_missed = sum(1 for d in delays if np.isinf(d))
+
+    logger.debug(
+        "MRL — FP=%d, MRL=%s, n_missed=%d/%d, n_detected=%d",
+        FP, MRL, n_missed, len(true), len(detected),
+    )
+    return {
+        "FP": FP,
+        "MRL": MRL,
+        "delays": delays,
+        "n_missed": n_missed,
+        "n_true_cps": len(true),
+        "n_detected": len(detected),
+        "n_detected_total": len(detected_all),
+    }
 
 
 def compute_risk(

@@ -24,25 +24,133 @@ logger = setup_logger(__name__)
 _ANOMALY_DETECTORS = {"Isolation Forest", "One-Class SVM"}
 
 
-def get_baselines(params: dict) -> dict:
+def build_gru_classifier(
+    input_dim: int,
+    hidden_dim: int = 32,
+    dropout: float = 0.3,
+    epochs: int = 100,
+    lr: float = 0.001,
+):
+    """Build a GRU-based classifier (sklearn-compatible).
+
+    Uses PyTorch if available; falls back to MLPClassifier otherwise.
+
+    Parameters
+    ----------
+    input_dim:
+        Number of input features.
+    hidden_dim:
+        GRU hidden units.
+    dropout:
+        Dropout probability.
+    epochs:
+        Training epochs.
+    lr:
+        Adam learning rate.
+    """
+    try:
+        import torch
+        import torch.nn as nn
+        from sklearn.base import BaseEstimator, ClassifierMixin
+
+        class GRUClassifier(BaseEstimator, ClassifierMixin):
+            def __init__(self):
+                self.hidden_dim = hidden_dim
+                self.dropout = dropout
+                self.epochs = epochs
+                self.lr = lr
+                self.input_dim = input_dim
+                self.model_ = None
+                self.classes_ = np.array([0, 1])
+
+            def _build_model(self):
+                return nn.Sequential(
+                    nn.GRU(self.input_dim, self.hidden_dim,
+                           batch_first=True, dropout=0.0),
+                )
+
+            def fit(self, X, y):
+                X = np.asarray(X, dtype=np.float32)
+                y = np.asarray(y, dtype=np.int64)
+                # Shape: (n, 1, d) — treat feature vector as 1-step sequence
+                X_t = torch.tensor(X[:, None, :])
+                y_t = torch.tensor(y)
+
+                class GRUNet(nn.Module):
+                    def __init__(self, in_d, hid, drop):
+                        super().__init__()
+                        self.gru = nn.GRU(in_d, hid, batch_first=True)
+                        self.drop = nn.Dropout(drop)
+                        self.fc = nn.Linear(hid, 2)
+
+                    def forward(self, x):
+                        out, _ = self.gru(x)
+                        out = self.drop(out[:, -1, :])
+                        return self.fc(out)
+
+                self.model_ = GRUNet(self.input_dim, self.hidden_dim, self.dropout)
+                counts = np.bincount(y, minlength=2)
+                weights = torch.tensor(
+                    1.0 / (counts + 1e-6), dtype=torch.float32
+                )
+                criterion = nn.CrossEntropyLoss(weight=weights)
+                optimizer = torch.optim.Adam(self.model_.parameters(), lr=self.lr)
+
+                self.model_.train()
+                for _ in range(self.epochs):
+                    optimizer.zero_grad()
+                    logits = self.model_(X_t)
+                    loss = criterion(logits, y_t)
+                    loss.backward()
+                    optimizer.step()
+                return self
+
+            def predict_proba(self, X):
+                X = np.asarray(X, dtype=np.float32)
+                X_t = torch.tensor(X[:, None, :])
+                self.model_.eval()
+                with torch.no_grad():
+                    logits = self.model_(X_t)
+                    proba = torch.softmax(logits, dim=1).numpy()
+                return proba
+
+            def predict(self, X):
+                return self.predict_proba(X).argmax(axis=1)
+
+        return GRUClassifier()
+
+    except ImportError:
+        logger.warning(
+            "PyTorch not available — GRU classifier falls back to MLPClassifier."
+        )
+        return MLPClassifier(hidden_layer_sizes=(hidden_dim,), max_iter=200)
+
+
+def get_baselines(params: dict, input_dim: int = 4) -> dict:
     """Instantiate all baseline classifiers.
 
     Parameters
     ----------
     params:
         The ``baselines`` sub-dict from ``config/params.yaml``.
+    input_dim:
+        Number of input features (passed to GRU classifier).
 
     Returns
     -------
     dict mapping classifier name → unfitted sklearn-compatible estimator.
         Keys: ``'Logistic Regression'``, ``'Isolation Forest'``,
-        ``'One-Class SVM'``, ``'Feedforward NN'``.
+        ``'One-Class SVM'``, ``'Feedforward NN'``, ``'GRU (RNN)'``.
     """
     lr_C_range = params.get("lr_C_range", [0.01, 0.1, 1, 10])
     if_contamination = params.get("if_contamination", "auto")
     ocsvm_kernel = params.get("ocsvm_kernel", "rbf")
     fnn_hidden = tuple(params.get("fnn_hidden", [64, 32]))
     fnn_epochs = int(params.get("fnn_epochs", 100))
+    gru_hidden = int(params.get("gru_hidden_dim", 32))
+    gru_dropout = float(params.get("gru_dropout", 0.3))
+    gru_epochs = int(params.get("gru_epochs", 100))
+    gru_lr = float(params.get("gru_lr", 0.001))
 
     lr_base = LogisticRegression(class_weight="balanced", max_iter=1000, solver="lbfgs")
     lr = GridSearchCV(
@@ -65,6 +173,13 @@ def get_baselines(params: dict) -> dict:
             max_iter=fnn_epochs * 5,  # allow enough iterations
             early_stopping=True,
             random_state=42,
+        ),
+        "GRU (RNN)": build_gru_classifier(
+            input_dim=input_dim,
+            hidden_dim=gru_hidden,
+            dropout=gru_dropout,
+            epochs=gru_epochs,
+            lr=gru_lr,
         ),
     }
 

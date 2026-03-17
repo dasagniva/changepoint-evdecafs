@@ -10,11 +10,32 @@ produce a time-varying shape parameter (EVI field ξ_t) that inflates the
 changepoint penalty in regions of heavy-tailed behaviour, preventing spurious
 detections near outlier clusters. Detected changepoints are then classified as
 *sustained* (true structural shifts) or *recoiled* (transient excursions) by a
-Fourier Probabilistic Neural Network (FPNN) trained on four handcrafted features.
+Fourier Probabilistic Neural Network (FPNN) trained on five handcrafted features.
 
 The repository is fully self-contained: all algorithms are implemented from
 scratch in NumPy/SciPy, a suite of 158 unit tests verifies every component, and
-two entry-point scripts drive end-to-end experiments.
+two entry-point scripts drive end-to-end experiments across three real/synthetic
+datasets.
+
+**Current version: v4.2** (2026-03-17)
+- BOCPD primary labelling oracle (`bocpd_labeller.py`): replaces the traditional
+  kappa_mu/kappa_S rule for training-set CP labelling; uses Bayesian Online
+  Changepoint Detection with Normal-Inverse-Gamma conjugate prior and adaptive
+  hazard rate 1/n
+- BIC sweep values trimmed from 17 to 8 (`[0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 10.0, 20.0]`);
+  selection rule changed to crossover heuristic (C just before n_detected ≤ target)
+- Monte Carlo B reduced from 500 to 200 (WSL2 machine runtime constraint)
+- BIC-selected C lowered: welllog/oilwell 8.0→5.0, us_ip_growth 1.5→1.0
+
+**v4.1** (2026-03-11)
+- New visualization suite (4 new figure types; heatmaps, ROC curves, and
+  financial analysis figures removed)
+- `brent_crude` replaced by US Industrial Production growth rate (`us_ip_growth`)
+  loaded via FRED API with NBER recession ground truth
+- 5th feature `xi_local` (local EVI at changepoint) added to feature extractor
+- Monte Carlo metrics expanded: Brier score and Cohen's kappa added alongside
+  balanced accuracy, MCC, and AUC-ROC
+- Violin plots replace boxplots for MC classifier comparison
 
 ---
 
@@ -29,13 +50,13 @@ changepoint-evdecafs/
 ├── notebooks/
 │   └── tester.ipynb             # 14-cell interactive component tester
 ├── results/
-│   ├── figures/                 # PDF/PNG outputs from pipeline runs
-│   └── tables/                  # CSV metrics and sensitivity tables
+│   ├── figures/                 # PDF outputs from pipeline runs
+│   └── tables/                  # CSV metrics tables
 ├── scripts/
-│   ├── run_pipeline.py          # Full end-to-end pipeline (603 lines)
-│   └── run_phase1_comparison.py # Phase I variant comparison (231 lines)
+│   ├── run_pipeline.py          # Full end-to-end pipeline orchestration
+│   └── run_phase1_comparison.py # Phase I variant comparison
 ├── src/
-│   ├── data/loader.py           # Bitcoin + well-log data loaders
+│   ├── data/loader.py           # Well-log, oilwell, US IP growth loaders
 │   ├── evaluation/
 │   │   ├── classification_metrics.py
 │   │   ├── hausdorff.py
@@ -45,8 +66,9 @@ changepoint-evdecafs/
 │   │   ├── ar1_model.py         # Yule-Walker AR(1) estimation
 │   │   ├── decafs.py            # DP recursion (Algorithm 1)
 │   │   ├── evt_penalty.py       # GPD penalty + exceedance-count penalty
-│   │   └── feature_extract.py  # 4-feature extractor (Algorithm 2)
+│   │   └── feature_extract.py  # 5-feature extractor (Algorithm 2)
 │   ├── phase2/
+│   │   ├── bocpd_labeller.py    # BOCPD labelling oracle (primary, v4.2+)
 │   │   ├── fpnn.py              # FourierPNN classifier (Algorithms 4–5)
 │   │   ├── labelling.py         # Sustained / recoiled labelling (Algorithm 3)
 │   │   ├── smote_balance.py     # SMOTE class balancing
@@ -54,24 +76,20 @@ changepoint-evdecafs/
 │   ├── utils/logging_config.py  # Dual-handler logger (console + file)
 │   └── visualization/
 │       ├── style.py             # Publication rcParams (LaTeX-optional)
-│       ├── run_charts.py        # Time-series run charts
-│       ├── roc_curves.py        # Overlaid ROC plots
-│       └── sensitivity_heatmap.py
-└── tests/                       # 158 pytest tests across 5 files
+│       ├── run_charts.py        # Time-series run charts with CP labels
+│       ├── phase2_visualization.py  # Phase II key figure + US IP annotated
+│       ├── mc_comparison.py     # MC violin plot (4-panel)
+│       ├── phase1_comparison.py # Phase I multimetric bar chart
+│       └── tail_plots.py        # Tail diagnostics 3-panel figure
+└── tests/                       # 158 pytest tests across 6 files
 ```
 
 ---
 
 ## Datasets
 
-### Bitcoin Daily Log-Prices
-- **Source**: Yahoo Finance via `yfinance` (BTC-USD, 2014-01-01 → 2024-12-31);
-  cached to `data/raw/btc_usd.csv` on first run.
-- **Signal**: Natural log of daily closing price.
-- **Split**: Training ≤ 2022-12-31, test = 2023-01-01 onwards.
-- **Ground truth**: No labelled changepoints; detection is exploratory.
+### 1. Well-Log Nuclear Response (`welllog`)
 
-### Well-Log Nuclear Response
 - **Source**: Real CSV (`data/raw/welllog.csv`) if present; otherwise a
   synthetic surrogate is generated and cached automatically.
 - **Synthetic surrogate** (4 050 observations):
@@ -81,6 +99,29 @@ changepoint-evdecafs/
   - AR(1) noise: φ = 0.5, σ_v = 2 000.
   - 20 outlier spikes of magnitude ±30 000 injected at random positions.
 - **Split**: 75% training (≈ 3 037 obs), 25% test (≈ 1 013 obs).
+- **BIC-selected penalty (v4.2)**: C = 5.0, α₀ = 40.09; 38 train CPs detected.
+
+### 2. Oilwell Pressure (`oilwell`)
+
+- **Source**: Synthetic oilwell pressure series generated by the pipeline.
+- **Characteristics**: Step-change pressure regime shifts typical of well
+  test sequences; moderate AR(1) autocorrelation.
+- **Split**: 80% training, 20% test.
+- **BIC-selected penalty (v4.2)**: C = 5.0, α₀ = 40.03; 15 train CPs detected.
+
+### 3. US Industrial Production Growth (`us_ip_growth`)
+
+- **Source**: FRED series `INDPRO` (monthly, downloaded via `fredapi` or
+  fallback FRED CSV URL). Month-over-month growth rate (%) computed.
+- **Date range**: 2000-01-01 to 2026-01-01.
+- **Ground truth changepoints**: NBER recession boundary dates converted to
+  series indices — March 2001, November 2001, December 2007, June 2009,
+  February 2020, April 2020.
+- **Split**: 80% training (through 2023-12-01), 20% test.
+- **Special figure**: `us_ip_growth_annotated.pdf` — IP index with NBER
+  recession shading bands.
+- **BIC-selected penalty (v4.2)**: C = 1.0, α₀ = 5.66; 11 train CPs detected.
+- **Config**: `type: fred`, `fred_series_id: "INDPRO"`.
 
 ---
 
@@ -100,10 +141,15 @@ Three parameters are estimated from the training series:
 |-------------|-----------------------------------------------------|
 | φ           | Yule-Walker (lag-1 autocorrelation), clipped to (−0.999, 0.999) |
 | σ²_v        | Variance of AR(1) residuals `y[1:] − φ·y[:-1]`     |
-| σ²_eta      | `max(Var(Δy) − 2σ²_v / (1+|φ|), 1e-8)` — level process variance |
+| σ²_eta      | `max(Var(Δy) − 2σ²_v / (1+|φ|), 1e-3 × σ²_v)` — regularized floor prevents degeneracy at near-unit-root φ |
 
 These yield the precision parameters fed to the DP:
 `lambda = 1/σ²_eta`,  `gamma = 1/σ²_v`.
+
+**BIC penalty sweep** (`compute_bic_penalty()`): C × log(n_train) evaluated
+over C ∈ {0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 10.0, 20.0} (v4.2). The
+**crossover heuristic** selects the C just before n_detected first drops
+≤ `expected_n_changepoints`.
 
 ### Step 2 — EVI Field Computation (`src/phase1/evt_penalty.py`)
 
@@ -116,7 +162,8 @@ xi_t = shape parameter of GPD fit to exceedances in W_t
 ```
 
 If fewer than 5 exceedances are present, xi_t = 0. The result is an n-length
-**EVI field** capturing local tail-heaviness.
+**EVI field** capturing local tail-heaviness. Method-of-moments estimation
+is used for speed (~0.15 s total vs >130 s for MLE).
 
 ### Step 3 — Adaptive Penalty Schedule
 
@@ -124,11 +171,11 @@ Two penalty variants are implemented:
 
 **GPD-based** (primary, used throughout the paper):
 ```
-alpha_t = alpha_0 * (1 + lambda_ev * max(xi_t, 0))
+alpha_t = alpha_0 * (1 + lambda_ev * |xi_t|)
 ```
-- `alpha_0 = 10`, `lambda_ev = 1.0`
-- Penalty is monotone in xi_t; regions with heavy tails get a larger penalty,
-  discouraging false changepoints near outlier clusters.
+- `alpha_0` set by BIC sweep (C × log n_train); `lambda_ev = 1.0`
+- Two-sided |ξ_t| formula: both heavy-tailed (ξ > 0) and sharply-bounded
+  (ξ < 0) windows elevate the penalty, keeping ~99% of time points above α₀.
 
 **Exceedance-count** (ablation baseline):
 ```
@@ -136,7 +183,6 @@ alpha_t = alpha_0 * (1 + E_t / (2w+1))
 ```
 - E_t = number of observations in W_t deviating from a preliminary mean
   estimate by more than c·σ_v (c = 2.5).
-- Simpler, count-based approximation of the GPD approach.
 
 A **flat penalty** (standard DeCAFS, alpha_t = alpha_0 everywhere) serves as
 the non-EVT baseline.
@@ -163,7 +209,8 @@ Q_t(mu) = min_u { Q_{t-1}(u)
 - **Changepoint criterion**: a changepoint is declared at t if
   `(mu_hat[t] − mu_hat[t−1])² > alpha_t[t] / lambda`.
 
-**Typical runtime**: ~8 s on 3 037 well-log training observations (single core).
+**Typical runtime (v4.1)**: ~1.771 s for n=3 037 well-log training
+observations (single core, method-of-moments EVI).
 
 ---
 
@@ -175,28 +222,44 @@ For each detected changepoint τ, two local windows are formed:
 - D_minus = y[τ−L : τ]  (pre-change, L = 5)
 - D_plus  = y[τ+1 : τ+L+1]  (post-change)
 
-Four features are computed:
+Five features are computed:
 
-| Feature   | Formula                                               | Interpretation              |
-|-----------|-------------------------------------------------------|-----------------------------|
-| delta_mu  | mean(D_plus) − mean(D_minus)                          | Signed shift magnitude      |
-| S         | fraction of D_plus within ε of mean(D_plus)           | Post-change persistence     |
-| phi_local | lag-1 autocorrelation of post-change residuals r_t    | Local AR(1) coefficient     |
-| V         | var(D_minus) / (var(D_plus) + 1e-10)                  | Pre/post variance ratio     |
+| Feature    | Formula                                               | Interpretation              |
+|------------|-------------------------------------------------------|-----------------------------|
+| delta_mu   | mean(D_plus) − mean(D_minus)                          | Signed shift magnitude      |
+| S          | fraction of D_plus within ε of mean(D_plus)           | Post-change persistence     |
+| phi_local  | lag-1 autocorrelation of post-change residuals r_t    | Local AR(1) coefficient     |
+| V          | var(D_minus) / (var(D_plus) + 1e-10)                  | Pre/post variance ratio     |
+| xi_local   | EVI field value at the changepoint index τ            | Local tail heaviness at CP  |
 
 The persistence tolerance ε defaults to `median(|y − mu_hat|)` over the
 training series.
 
-### Labelling (`src/phase2/labelling.py`, Algorithm 3)
+### Labelling — Primary Oracle (`src/phase2/bocpd_labeller.py`, v4.2+)
 
-A changepoint is labelled **sustained** (class 1) if and only if:
+**BOCPD labeller** (primary for training set): runs BOCPD with a
+Normal-Inverse-Gamma conjugate prior on the segment between each pair of
+consecutive DeCAFS-detected CPs, using adaptive hazard rate `h = 1/n`. A CP is
+labelled **sustained** (class 1) if the posterior CP probability at that
+position exceeds `bocpd.threshold` (default 0.3); **recoiled** (class 0) if
+below. CPs where the post-CP window is too short for reliable inference are
+marked **pending** (excluded from training).
+
+On MC synthetic data with the current config, BOCPD labels virtually all CPs
+sustained (0 recoiled per rep), concentrating all training signal on the
+sustained class. On real datasets the split varies: welllog 10S/28R, oilwell
+0S/4R/11P, us_ip_growth 6S/5R.
+
+### Labelling — Fallback (`src/phase2/labelling.py`, Algorithm 3)
+
+Traditional threshold rule (used for test-set labelling and as fallback):
 ```
-|delta_mu| > kappa_mu   AND   S > kappa_S
+|delta_mu| > kappa_mu   AND   S > kappa_S  →  sustained (class 1)
 ```
 - `kappa_mu` = 75th percentile of |delta_mu| over all training changepoints.
 - `kappa_S = 0.5` (fixed threshold).
 
-Otherwise it is labelled **recoiled** (class 0).
+Otherwise **recoiled** (class 0).
 
 ### Class Balancing (`src/phase2/smote_balance.py`)
 
@@ -223,7 +286,7 @@ Fourier series with Fejér kernel weighting.
    B_{c,d,j} = Σ_{i∈c} sin(π j z_d^(i))
    ```
 3. Apply Fejér weighting: `w_j = (J+1−j) / (N_c · (J+1))`.
-4. Stored coefficients: `coef_cos_[c]`, `coef_sin_[c]`, both shape (4, J).
+4. Stored coefficients: `coef_cos_[c]`, `coef_sin_[c]`, both shape (5, J).
 
 **Prediction (Algorithm 5):**
 1. For each test sample and class c, reconstruct the density per feature d:
@@ -233,8 +296,8 @@ Fourier series with Fejér kernel weighting.
 2. Class log-score = Σ_d log(f_d) + log(N / (2 N_c))  (prior correction).
 3. Log-sum-exp normalisation → calibrated probabilities.
 
-**Well-log result**: Balanced accuracy = 0.833, MCC = 0.707, AUC-ROC = 1.000
-(6 test changepoints, 3 sustained / 3 recoiled).
+**Welllog MC result (v4.2, B=200)**: FPNN BA=0.744±0.241, AUC=0.792±0.254
+— leads all classifiers on all metrics including Brier score and Cohen's kappa.
 
 ### Baseline Classifiers (`src/phase2/baselines.py`)
 
@@ -261,6 +324,8 @@ kappa_mu / kappa_S thresholds from training is applied.
 - **Matthews Correlation Coefficient (MCC)** — single scalar summarising the
   full confusion matrix.
 - **AUC-ROC** — area under the ROC curve (requires probability scores).
+- **Brier score** — mean squared probability error; lower = better calibration.
+- **Cohen's kappa** — agreement beyond chance.
 - Per-class F1, precision, recall.
 
 ### MRL Index (`src/evaluation/mrl_index.py`)
@@ -284,8 +349,6 @@ R_tilde = (cF * FP) / (cD * MRL_censored)
 ```
 where cF is the cost per false positive and cD the cost per unit delay.
 
-**Well-log result**: EV-DeCAFS (GPD) — 65 total FP, mean MRL = 82 observations.
-
 ### Hausdorff Distance (`src/evaluation/hausdorff.py`)
 
 The symmetric Hausdorff distance between the set of detected changepoints and
@@ -295,18 +358,10 @@ H(A, B) = max( max_{a∈A} min_{b∈B} |a−b|,  max_{b∈B} min_{a∈A} |a−b|
 ```
 Returns 0 if either set is empty.
 
-**Well-log result**: H(EV-DeCAFS GPD, true CPs) = 2 633 observations.
-
 ### Cost-Ratio Sensitivity Analysis (`src/evaluation/sensitivity.py`)
 
 Over a grid of (cF, cD) pairs — cF ∈ {1, 2, 5}, cD ∈ {1, 3, 5, 10} — each
-detector is ranked by R_tilde (1 = best). Ties share the minimum rank. Results
-are stored as two DataFrames with a MultiIndex (cF, cD):
-
-- **rankings_df**: integer ranks per (cF, cD, detector) triple.
-- **raw_df**: corresponding R_tilde float values.
-
-Visualised as two heatmaps: winner-name colour map and winner R_tilde values.
+detector is ranked by R_tilde (1 = best). Ties share the minimum rank.
 
 ---
 
@@ -317,14 +372,35 @@ All figures use a unified publication style (`apply_style()`):
 - LaTeX rendering when `latex` is found on PATH; falls back to mathtext.
 - No top/right spines; consistent colour palette.
 
-| Figure                    | Description                                         |
-|---------------------------|-----------------------------------------------------|
-| `*_train_run_chart`       | Raw series + estimated means + detected CPs (training) |
-| `*_test_run_chart`        | Same for the test period                            |
-| `*_detector_comparison`   | Multi-panel: GPD vs flat penalty detected CPs       |
-| `*_roc`                   | Overlaid ROC curves for all classifiers             |
-| `*_sensitivity_ranks`     | Best-detector heatmap over (cF, cD) grid            |
-| `*_sensitivity_values`    | Winning R_tilde values over (cF, cD) grid           |
+### Figure Types (v4.1)
+
+| Figure file pattern                  | Description                                                     |
+|--------------------------------------|-----------------------------------------------------------------|
+| `{ds}_train_run_chart.pdf`           | Series + mean estimate + CPs coloured by FPNN label (train)    |
+| `{ds}_test_run_chart.pdf`            | Same for the test period (test-relative coordinates)           |
+| `{ds}_phase2_classification.pdf`     | **Key figure**: 2-panel (train top, test bottom); green solid = sustained, orange dashed = recoiled |
+| `{ds}_phase1_detector_comparison.pdf`| 6-panel grid: GPD / exceedance-count / flat penalty × train/test |
+| `{ds}_phase1_multimetric.pdf`        | 4-panel grouped bar chart: #CPs, FP count, missed CPs, Hausdorff distance |
+| `{ds}_tail_diagnostics_train.pdf`    | 3-panel: EVI histogram with EVD shading, KS p-value scatter, tail-type pie |
+| `{ds}_fig_mc_classifier_comparison.pdf` | 2×2 violin plot: BA, MCC, Brier score, Cohen's kappa (FPNN blue, baselines grey); one per dataset |
+| `us_ip_growth_annotated.pdf`         | IP index with NBER recession shading (US IP dataset only)      |
+
+### Removed figure types (from v4.0 and earlier)
+
+The following were removed in v4.1:
+- Sensitivity heatmaps (`*_sensitivity_ranks.pdf`, `*_sensitivity_values.pdf`)
+- ROC curves (`*_roc.pdf`)
+- 2-panel detector comparison (`*_detector_comparison.pdf`)
+- Financial analysis figure (`brent_crude_financial_analysis.pdf`)
+
+### Run Chart CP Colouring (`src/visualization/run_charts.py`)
+
+When FPNN labels are provided, `plot_run_chart()` colours detected CPs by type:
+- **Sustained** (label=1): green solid vertical line
+- **Recoiled** (label=0): orange dashed vertical line
+
+True CPs are filtered to the displayed coordinate range [0, n) to prevent
+out-of-bounds markers in train-only or test-only panels.
 
 ---
 
@@ -333,7 +409,7 @@ All figures use a unified publication style (`apply_style()`):
 ### `scripts/run_pipeline.py` — Full Pipeline
 
 ```
-python scripts/run_pipeline.py --dataset [bitcoin|welllog|both]
+python scripts/run_pipeline.py --dataset [welllog|oilwell|us_ip_growth|all]
                                --config config/params.yaml
                                --output-dir results/
                                [--skip-baselines]
@@ -341,37 +417,52 @@ python scripts/run_pipeline.py --dataset [bitcoin|welllog|both]
 
 **Execution flow:**
 
-1. `run_phase1(y_train)` → AR(1) estimation, EVI field, GPD penalty, EV-DeCAFS.
-2. `run_phase2_train(y_train, phase1)` → feature extraction, labelling, SMOTE,
-   FPNN training.
+1. `run_phase1(y_train)` → AR(1) estimation, BIC sweep, EVI field, GPD
+   penalty, EV-DeCAFS.
+2. `run_phase2_train(y_train, phase1)` → feature extraction (5 features),
+   labelling, SMOTE, FPNN training.
 3. `run_phase2_test(y_test, ...)` → EV-DeCAFS on test, feature extraction,
-   auto-labelling, FPNN + baseline evaluation, ROC computation.
-4. `run_mrl_analysis(...)` → MRL aggregation, Hausdorff, sensitivity grid.
-5. `_make_figures(...)` → all six figure types.
-6. Tables saved to `results/tables/`; runtime CSV written.
+   auto-labelling, FPNN + baseline evaluation.
+4. `_run_tail_diagnostics_section(...)` → GPD tail fit summaries (CSV +
+   `{ds}_tail_diagnostics_train.pdf`).
+5. `_run_phase1_detector_comparison(...)` → baseline detector MRL/Hausdorff
+   tables + `{ds}_phase1_multimetric.pdf`.
+6. `_run_monte_carlo_section(...)` → B=200 MC runs collecting BA, MCC,
+   AUC-ROC, Brier score, Cohen's kappa; violin plot saved as
+   `{ds}_fig_mc_classifier_comparison.pdf` (runs for all three datasets).
+7. `_make_figures(y_train, y_test, true_cps_train, true_cps_test_rel,
+   phase1, phase2_train, phase2_test, fig_dir, dataset_name)` →
+   run charts, phase2 classification figure, US IP annotated figure.
 
-**Observed runtime (well-log, skip-baselines):**
+**Coordinate-correct CP display**: true CPs passed to `_make_figures` are
+split into `true_cps_train` (indices < len(y_train)) and `true_cps_test_rel`
+(test-relative indices ≥ 0). Each panel displays only CPs within its own
+coordinate range [0, n).
 
-| Stage             | Time     |
-|-------------------|----------|
-| AR(1) estimation  | < 0.001 s |
-| EVI field (train) | ≈ 120 s  |
-| EV-DeCAFS (train) | ≈ 8 s    |
-| Feature extraction| < 0.01 s |
-| SMOTE + FPNN      | < 0.05 s |
-| EVI field (test)  | ≈ 46 s   |
-| EV-DeCAFS (test)  | ≈ 2.5 s  |
-| **Total**         | ≈ 129 s  |
+**Observed runtime (welllog, v4.2, WSL2 / 32-core / 23 GB RAM):**
+
+| Stage                                | Time        |
+|--------------------------------------|-------------|
+| AR(1) estimation                     | < 0.001 s   |
+| BIC sweep (8 C values)               | ~2 min      |
+| EVI field (train, method-of-moments) | ~0.213 s    |
+| EV-DeCAFS DP (train, n=3 037)        | ~16.4 s     |
+| Feature extraction (5 features)      | < 0.003 s   |
+| SMOTE + FPNN train                   | ~0.172 s    |
+| Phase II test (incl. baselines)      | ~9.5 s      |
+| **Total per dataset (excl. MC)**     | **~1–2 min**|
+
+*~9× slower than Intel 14th-gen single-core (v4.1 DP: 1.6 s vs v4.2 DP: 16.4 s).*
 
 ### `scripts/run_phase1_comparison.py` — Penalty Variant Comparison
 
 ```
-python scripts/run_phase1_comparison.py --dataset [bitcoin|welllog|both]
+python scripts/run_phase1_comparison.py --dataset welllog
 ```
 
 Fits all three penalty variants (GPD, flat, exceedance-count) on the same
-training data, then produces MRL tables, Hausdorff tables, and sensitivity
-heatmaps for direct comparison.
+training data, then produces MRL tables and Hausdorff tables for direct
+comparison.
 
 ---
 
@@ -380,31 +471,59 @@ heatmaps for direct comparison.
 All hyperparameters are centralised; the scripts read the config at startup and
 pass values down without hard-coded constants in the source.
 
-| Section     | Key parameters                                                         |
-|-------------|------------------------------------------------------------------------|
-| `phase1`    | alpha_0=10, lambda_ev=1.0, w=50, q0=0.90, c=2.5                      |
-| `labelling` | kappa_mu_percentile=75, kappa_S=0.5, window_L=5                       |
-| `fpnn`      | J_harmonics=10, scaling_range=[-0.5, 0.5]                             |
-| `smote`     | k_neighbors=5, random_state=42                                         |
-| `baselines` | lr_C_range=[0.01,0.1,1,10], fnn_hidden=[64,32]                        |
-| `evaluation`| cF_grid=[1,2,5], cD_grid=[1,3,5,10], epsilon=1, Tmax_fraction=0.20   |
-| `splitting` | bitcoin_train_end="2022-12-31", welllog_train_fraction=0.75           |
-| `visualization` | dpi=300, figure_format="pdf"                                      |
+| Section     | Key parameters                                                          |
+|-------------|-------------------------------------------------------------------------|
+| `phase1`    | `tune_bic: true`, `bic_sweep_values: [0.5,1.0,2.0,3.0,5.0,8.0,10.0,20.0]`, `lambda_ev=1.0`, `w=50`, `q0=0.90` |
+| `labelling` | `kappa_mu_percentile=75`, `kappa_S=0.5`, `window_L=5`                  |
+| `fpnn`      | `J_harmonics=10`, `scaling_range=[-0.5, 0.5]`                          |
+| `smote`     | `k_neighbors=5`, `random_state=42`                                      |
+| `baselines` | `lr_C_range=[0.01,0.1,1,10]`, `fnn_hidden=[64,32]`                     |
+| `evaluation`| `cF_grid=[1,2,5]`, `cD_grid=[1,3,5,10]`, `epsilon=1`, `Tmax_fraction=0.20` |
+| `monte_carlo`| `B=200`, synthetic series parameters                                   |
+| `visualization` | `dpi=300`, `figure_format="pdf"`                                    |
+| `hypersensitive_cpd` | `bocpd_threshold=0.5`, `cusum_h_multiplier=1.0`, `relabel_tolerance_window=10` |
+| `bocpd`     | `threshold=0.3`, `tolerance_fraction=0.02`, `kappa_prior=0.1`, `alpha_prior=1.0` |
+
+**Datasets block (v4.2):**
+```yaml
+datasets:
+  - name: welllog
+    type: local
+    train_fraction: 0.75
+    expected_n_changepoints: 12
+
+  - name: oilwell
+    type: local
+    train_fraction: 0.75
+    expected_n_changepoints: 8
+
+  - name: us_ip_growth
+    type: fred
+    train_fraction: 0.80
+    expected_n_changepoints: 8
+    fred_series_id: "INDPRO"
+    start_date: "2000-01-01"
+    end_date: "2026-01-01"
+    train_end_date: "2023-12-01"
+```
+
+`fredapi>=0.5.0` is required for the FRED download; a fallback to direct
+FRED CSV URL is available when no API key is set.
 
 ---
 
 ## Testing (`tests/`)
 
-158 unit tests across 5 files, run with `pytest tests/ -q`.
+158 unit tests across 6 files, run with `pytest tests/ -q`.
 
-| File                         | Scope                                          | Tests |
-|------------------------------|------------------------------------------------|-------|
-| `test_data.py`               | Loader shape/dtype, cache round-trip, synthetic generation | 18 |
-| `test_phase1.py`             | AR(1) properties, EVI field, DP recursion correctness | 28 |
-| `test_phase2_prep.py`        | Feature extraction, labelling thresholds, SMOTE | 33 |
-| `test_phase2_classifiers.py` | FPNN fit/predict, baselines train/evaluate     | 31 |
-| `test_evaluation.py`         | MRL edge cases, Hausdorff, sensitivity, viz smoke tests | 42 |
-| `test_smoke.py`              | End-to-end pipeline smoke with tiny synthetic data | 6 |
+| File                         | Scope                                                     | Tests |
+|------------------------------|-----------------------------------------------------------|-------|
+| `test_data.py`               | Loader shape/dtype, cache round-trip, synthetic generation | 18   |
+| `test_phase1.py`             | AR(1) properties, EVI field, DP recursion correctness      | 28   |
+| `test_phase2_prep.py`        | Feature extraction, labelling thresholds, SMOTE            | 33   |
+| `test_phase2_classifiers.py` | FPNN fit/predict, baselines train/evaluate                 | 31   |
+| `test_evaluation.py`         | MRL edge cases, Hausdorff, sensitivity, viz smoke tests    | 42   |
+| `test_smoke.py`              | End-to-end pipeline smoke with tiny synthetic data         | 6    |
 
 Notable test cases:
 - `test_missed_detection` — MRL = ∞ when no detection at or after true CP.
@@ -419,21 +538,21 @@ Notable test cases:
 
 A 14-cell Jupyter notebook for step-by-step interactive verification:
 
-| Cell | Component tested                                          |
-|------|-----------------------------------------------------------|
-| 1    | Imports, config loading, inline matplotlib setup          |
-| 2    | Data loading — Bitcoin + well-log shape/plot checks       |
+| Cell | Component tested                                           |
+|------|------------------------------------------------------------|
+| 1    | Imports, config loading, inline matplotlib setup           |
+| 2    | Data loading — well-log shape/plot checks                  |
 | 3    | AR(1) estimation — parameter printout + ACF whiteness plot |
 | 4    | EVT penalty — EVI field, GPD vs exceedance-count side-by-side |
 | 5    | EV-DeCAFS — run chart with detected CPs and estimated means |
-| 6    | Feature extraction — shape, summary stats, histograms     |
-| 7    | Labelling — class distribution, kappa_mu check            |
-| 8    | SMOTE — before/after scatter plot                         |
-| 9    | FPNN — classification report, ROC, coefficient inspection |
-| 10   | Baselines — comparison table                              |
-| 11   | MRL index — FP / MRL / R_tilde with edge-case assertions  |
-| 12   | Sensitivity analysis — heatmap display                    |
-| 13   | Hausdorff distance + Spearman correlation with R_tilde    |
+| 6    | Feature extraction — shape, summary stats, histograms      |
+| 7    | Labelling — class distribution, kappa_mu check             |
+| 8    | SMOTE — before/after scatter plot                          |
+| 9    | FPNN — classification report, ROC, coefficient inspection  |
+| 10   | Baselines — comparison table                               |
+| 11   | MRL index — FP / MRL / R_tilde with edge-case assertions   |
+| 12   | Sensitivity analysis — ranked results display              |
+| 13   | Hausdorff distance + Spearman correlation with R_tilde     |
 | 14   | Full pipeline subprocess dry run + output file verification |
 
 Each cell includes PASS/FAIL assertions and try/except error reporting.
@@ -452,27 +571,40 @@ is halved vs int32 with no loss (500 < 32 767).
 
 **Log-sum-exp in FPNN**: Class log-scores are computed before exponentiation
 and normalised via log-sum-exp to prevent underflow when products of small
-densities are accumulated across 4 feature dimensions.
+densities are accumulated across 5 feature dimensions.
 
 **LaTeX-optional style**: `apply_style()` checks `shutil.which("latex")` before
 enabling `text.usetex`. LaTeX errors only surface at render time (not at
 rcParams assignment), so runtime detection is the only reliable guard.
 
-**Global params in pipeline**: `_make_figures()` accesses configuration via a
-module-level `params_global` dict to avoid threading the config object through
-all intermediate return values.
+**5-feature extraction**: The `xi_local` feature (EVI field value at the
+changepoint index) was added in v4.1 as an EVT-native signal to directly
+inform the FPNN about local tail behaviour at each candidate CP.
+
+**Coordinate-correct CP display**: True CPs are split at the train/test
+boundary and each panel receives only the CPs within its own index range
+[0, n) — prevents spurious out-of-bounds vertical lines in figures.
+
+**FRED fallback**: When `FRED_API_KEY` is not set, `load_us_ip_growth()`
+falls back to direct FRED CSV download, making the dataset available in
+environments without an API key.
 
 ---
 
 ## Reproducing Results
 
 ```bash
-# Install dependencies
+# Install dependencies (including FRED API client)
 pip install numpy scipy pandas matplotlib seaborn scikit-learn imbalanced-learn \
-            statsmodels tqdm yfinance pyyaml pytest jupyter
+            statsmodels tqdm pyyaml pytest jupyter ruptures fredapi
 
-# Run well-log experiment (no baselines for speed)
-python scripts/run_pipeline.py --dataset welllog --skip-baselines
+# Run full pipeline on all three datasets
+python scripts/run_pipeline.py --config config/params.yaml --dataset all
+
+# Run on a single dataset
+python scripts/run_pipeline.py --config config/params.yaml --dataset welllog
+python scripts/run_pipeline.py --config config/params.yaml --dataset oilwell
+python scripts/run_pipeline.py --config config/params.yaml --dataset us_ip_growth
 
 # Run Phase I variant comparison
 python scripts/run_phase1_comparison.py --dataset welllog
@@ -485,3 +617,30 @@ jupyter notebook notebooks/tester.ipynb
 ```
 
 Output files appear in `results/figures/` (PDFs) and `results/tables/` (CSVs).
+
+### Expected figure outputs per dataset
+
+```
+results/figures/
+├── {ds}_train_run_chart.pdf
+├── {ds}_test_run_chart.pdf
+├── {ds}_phase2_classification.pdf
+├── {ds}_phase1_detector_comparison.pdf
+├── {ds}_phase1_multimetric.pdf
+├── {ds}_tail_diagnostics_train.pdf
+├── {ds}_tail_diagnostics_test.pdf        # only if n_test > 200
+├── {ds}_fig_mc_classifier_comparison.pdf # per-dataset MC violin plot
+└── us_ip_growth_annotated.pdf            # US IP dataset only
+```
+
+### Expected table outputs
+
+```
+results/tables/
+├── {ds}_bic_sweep.csv
+├── {ds}_phase1_detector_comparison.csv
+├── {ds}_tail_diagnostics_train.csv
+├── {ds}_tail_summary_train.csv
+├── {ds}_monte_carlo_all_classifiers.csv
+└── {ds}_monte_carlo_coverage.csv
+```
