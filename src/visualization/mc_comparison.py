@@ -123,7 +123,7 @@ def plot_mc_classifier_comparison(mc_results, save_path, dpi=300):
     for idx in range(n_metrics, len(axes)):
         axes[idx].set_visible(False)
 
-    fig.suptitle('Monte Carlo Classification Performance (B = 500)',
+    fig.suptitle('Monte Carlo Classification Performance (B = 200)',
                  fontsize=13, fontweight='bold', y=1.01)
     plt.tight_layout()
     fig.savefig(save_path, dpi=dpi, bbox_inches='tight')

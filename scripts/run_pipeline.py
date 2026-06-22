@@ -533,7 +533,7 @@ def run_mrl_analysis(
 
     ep = params["evaluation"]
     n_test = len(phase2_test.get("decafs_result", {}).get("means", [1]))
-    Tmax = ep["censoring_Tmax_fraction"] * n_test
+    Tmax = float(n_test)  # use full test length: R̃ = FP/n_test when MRL=inf
     epsilon = ep["censoring_epsilon"]
     tolerance = int(ep["hausdorff_tolerance_fraction"] * n_test)
 
@@ -732,12 +732,23 @@ def run_dataset(
     if "fpnn" in phase2_train:
         _run_monte_carlo_section(
             name=name,
+            y_train=y_train,
             phase1_train=phase1,
             phase2_train=phase2_train,
             params=params,
             tbl_dir=tbl_dir,
             fig_dir=fig_dir,
             fig_fmt=fig_fmt,
+            # Use the configured fraction, not the empirical one.
+            # US IP growth is split by date (287/25 ≈ 0.92), but the configured
+            # fraction is 0.80 — using the empirical ratio gives a 23-point MC
+            # test set where EV-DeCAFS never detects a CP.
+            train_fraction=next(
+                (d.get("train_fraction", 0.75)
+                 for d in params.get("datasets", [])
+                 if d["name"] == name),
+                0.75,
+            ),
         )
 
     # ---- Save runtime ----
@@ -835,7 +846,7 @@ def _run_phase1_detector_comparison(
     """Run all Phase I baseline detectors on y_test and compare via MRL."""
     ep = params["evaluation"]
     n_test = len(y_test)
-    Tmax = ep["censoring_Tmax_fraction"] * n_test
+    Tmax = float(n_test)  # use full test length: R̃ = FP/n_test when MRL=inf
     epsilon = ep["censoring_epsilon"]
     tolerance = int(ep["hausdorff_tolerance_fraction"] * n_test)
 
@@ -940,12 +951,14 @@ def _run_phase1_detector_comparison(
 
 def _run_monte_carlo_section(
     name: str,
+    y_train: np.ndarray,
     phase1_train: dict,
     phase2_train: dict,
     params: dict,
     tbl_dir: Path,
     fig_dir: Path,
     fig_fmt: str,
+    train_fraction: float = 0.75,
 ) -> None:
     """Run Monte Carlo coverage simulation and save results to CSV."""
     mc_params = params.get("monte_carlo", {})
@@ -1017,6 +1030,9 @@ def _run_monte_carlo_section(
 
         if len(np.unique(lab_tr_mc)) < 2:
             return None  # only one class — can't train classifiers
+
+        if int(np.bincount(lab_tr_mc).min()) < 2:
+            return None  # minority class has only 1 sample — SMOTE would use k=0
 
         X_bal_mc, lab_bal_mc = balance_training_data(
             X_tr_mc, lab_tr_mc,
@@ -1105,18 +1121,97 @@ def _run_monte_carlo_section(
 
         return out
 
+    # --- Per-dataset calibration of synthetic series parameters ---
+    phi_emp = float(phase1_train["ar1"]["phi"])
+    sigma_v_emp = float(np.sqrt(phase1_train["ar1"]["sigma_v_sq"]))
+    sigma_eta_emp = 0.05 * sigma_v_emp  # 5% of sigma_v for slow drift
+
+    n_mc = min(len(y_train), 2000)
+
+    # us_ip_growth uses 4 rather than 8: with only n=287 training points, 8 CPs
+    # in range(100,187) leaves ~28 obs/segment on average and causes Yule-Walker
+    # to grossly overestimate phi and sigma_v, collapsing minority-class counts to
+    # 0-1 and making SMOTE impossible.  4 CPs matches Phase-I empirical detection.
+    _n_cps_by_dataset = {"welllog": 12, "oilwell": 8, "us_ip_growth": 4}
+    n_cps_mc = _n_cps_by_dataset.get(name, mc_params.get("n_changepoints", 8))
+
+    # Outlier rate from tail diagnostics
+    tail_summary_path = tbl_dir / f"{name}_tail_summary_train.csv"
+    fraction_frechet = 0.3
+    if tail_summary_path.exists():
+        try:
+            _ts = pd.read_csv(tail_summary_path)
+            fraction_frechet = float(_ts["fraction_frechet"].iloc[0])
+        except Exception:
+            pass
+    outlier_rate = 0.04 if fraction_frechet > 0.5 else 0.005
+    n_outliers_mc = max(3, int(round(outlier_rate * n_mc)))
+
+    # Jump sizes from empirical segment-mean differences
+    decafs_means = phase1_train["decafs_result"]["means"]
+    decafs_cps = phase1_train["decafs_result"]["changepoints"]
+    seg_means_emp: list[float] = []
+    if len(decafs_cps) > 0:
+        prev = 0
+        for _cp in decafs_cps:
+            seg_means_emp.append(float(np.mean(decafs_means[prev:_cp])))
+            prev = int(_cp)
+        seg_means_emp.append(float(np.mean(decafs_means[prev:])))
+    emp_diffs = np.abs(np.diff(seg_means_emp)) if len(seg_means_emp) > 1 else np.array([sigma_v_emp * 5.0])
+    jmin = float(max(np.percentile(emp_diffs, 25), sigma_v_emp * 1.5))
+    jmax = float(max(np.percentile(emp_diffs, 90), sigma_v_emp * 5.0))
+    jump_range = (jmin, jmax)
+    outlier_range = (jmax * 1.2, jmax * 2.5)
+
     series_p = {
-        "n": mc_params.get("series_n", 2000),
-        "n_changepoints": mc_params.get("n_changepoints", 8),
-        "n_outliers": mc_params.get("n_outliers", 15),
-        "phi": mc_params.get("phi", 0.5),
-        "sigma_v": mc_params.get("sigma_v", 2000.0),
+        "n": n_mc,
+        "n_changepoints": n_cps_mc,
+        "n_outliers": n_outliers_mc,
+        "phi": phi_emp,
+        "sigma_v": sigma_v_emp,
+        "sigma_eta": sigma_eta_emp,
+        "jump_magnitude_range": jump_range,
+        "outlier_magnitude_range": outlier_range,
     }
+    logger.info(
+        "[%s] MC series params: n=%d, n_cps=%d, n_outliers=%d, phi=%.4f, "
+        "sigma_v=%.4f, jump=(%.2f, %.2f), outlier=(%.2f, %.2f)",
+        name, n_mc, n_cps_mc, n_outliers_mc, phi_emp, sigma_v_emp,
+        jmin, jmax, outlier_range[0], outlier_range[1],
+    )
+
+    # Write per-dataset MC config row (accumulates across datasets)
+    mc_config_row = {
+        "dataset": name,
+        "n": n_mc,
+        "n_changepoints": n_cps_mc,
+        "n_outliers": n_outliers_mc,
+        "phi": round(phi_emp, 4),
+        "sigma_v": round(sigma_v_emp, 4),
+        "sigma_eta": round(sigma_eta_emp, 4),
+        "jump_min": round(jmin, 4),
+        "jump_max": round(jmax, 4),
+        "outlier_min": round(outlier_range[0], 4),
+        "outlier_max": round(outlier_range[1], 4),
+        "fraction_frechet": round(fraction_frechet, 4),
+        "outlier_rate": outlier_rate,
+    }
+    mc_config_path = tbl_dir / "monte_carlo_config.csv"
+    _mc_cfg_df = pd.DataFrame([mc_config_row])
+    if mc_config_path.exists():
+        try:
+            _existing = pd.read_csv(mc_config_path)
+            _existing = _existing[_existing["dataset"] != name]
+            _mc_cfg_df = pd.concat([_existing, _mc_cfg_df], ignore_index=True)
+        except Exception:
+            pass
+    _mc_cfg_df.to_csv(mc_config_path, index=False)
+    logger.info("MC config written: %s", mc_config_path)
 
     mc_results = run_monte_carlo(
         pipeline_func=pipeline_single_run,
         B=B,
-        train_fraction=params["splitting"]["welllog_train_fraction"],
+        train_fraction=train_fraction,
         series_params=series_p,
         seed=mc_params.get("seed", 42),
     )
@@ -1161,11 +1256,14 @@ def _run_monte_carlo_section(
     clf_mc_df = pd.DataFrame(clf_rows).set_index("Classifier")
     clf_mc_path = tbl_dir / f"{name}_monte_carlo_all_classifiers.csv"
     clf_mc_df.to_csv(clf_mc_path)
-    # Also write to legacy path for backward compat (first dataset wins)
-    legacy_path = tbl_dir / "monte_carlo_all_classifiers.csv"
-    if not legacy_path.exists():
-        clf_mc_df.to_csv(legacy_path)
     logger.info("Per-classifier MC table saved to %s", clf_mc_path)
+
+    # Remove legacy unscoped orphan files so they cannot be accidentally cited
+    for _orphan in ("monte_carlo_all_classifiers.csv", "monte_carlo_coverage.csv"):
+        _op = tbl_dir / _orphan
+        if _op.exists():
+            _op.unlink()
+            logger.info("Removed legacy MC orphan: %s", _op)
     logger.info("MC classifier summary:\n%s", clf_mc_df.to_string())
 
     # Violin plot figure (replaces box plot)

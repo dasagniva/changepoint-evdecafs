@@ -17,7 +17,7 @@ scratch in NumPy/SciPy, a suite of 158 unit tests verifies every component, and
 two entry-point scripts drive end-to-end experiments across three real/synthetic
 datasets.
 
-**Current version: v4.2** (2026-03-17)
+**Current version: v4.2** (updated 2026-05-04; initial 2026-03-17)
 - BOCPD primary labelling oracle (`bocpd_labeller.py`): replaces the traditional
   kappa_mu/kappa_S rule for training-set CP labelling; uses Bayesian Online
   Changepoint Detection with Normal-Inverse-Gamma conjugate prior and adaptive
@@ -26,6 +26,20 @@ datasets.
   selection rule changed to crossover heuristic (C just before n_detected ≤ target)
 - Monte Carlo B reduced from 500 to 200 (WSL2 machine runtime constraint)
 - BIC-selected C lowered: welllog/oilwell 8.0→5.0, us_ip_growth 1.5→1.0
+- **R̃ denominator fix (2026-05-06):** `_run_phase1_detector_comparison()` and
+  `run_mrl_analysis()` now use `Tmax = float(n_test)` instead of
+  `Tmax = censoring_Tmax_fraction * n_test`. When MRL = ∞ (no true test CPs),
+  this makes R̃ = FP / n_test, yielding 0.003 and 0.001 for oilwell (3 FP / 1 FP
+  out of n_test=1 000) vs the incorrect 0.015 / 0.005 (FP / 200).
+- **Per-dataset MC calibration (2026-05-04):** `_run_monte_carlo_section()` now
+  calibrates the synthetic prior to each dataset's empirical statistics. φ and σ_v
+  are taken from Phase I Yule-Walker estimates; n_cps targets BIC-sweep Table 1
+  values (12/8/4); outlier rate is 4% for Fréchet-dominant series (fraction_frechet
+  > 0.5), 0.5% otherwise; jump range is set from the 25th–90th percentile of
+  empirical segment-mean differences. Parameters written to `monte_carlo_config.csv`.
+  Legacy unscoped files `monte_carlo_all_classifiers.csv` and
+  `monte_carlo_coverage.csv` deleted; each dataset now has its own
+  `{ds}_monte_carlo_all_classifiers.csv` and `{ds}_monte_carlo_coverage.csv`.
 
 **v4.1** (2026-03-11)
 - New visualization suite (4 new figure types; heatmaps, ROC curves, and
@@ -296,8 +310,10 @@ Fourier series with Fejér kernel weighting.
 2. Class log-score = Σ_d log(f_d) + log(N / (2 N_c))  (prior correction).
 3. Log-sum-exp normalisation → calibrated probabilities.
 
-**Welllog MC result (v4.2, B=200)**: FPNN BA=0.744±0.241, AUC=0.792±0.254
+**Welllog MC result (v4.2, B=200, calibrated prior, 2026-05-06 run)**: FPNN BA=0.795±0.236, AUC=0.866±0.190
 — leads all classifiers on all metrics including Brier score and Cohen's kappa.
+Oilwell: FPNN BA=0.804±0.238, AUC=0.845±0.222. US IP growth MCC/AUC-ROC are
+undefined due to single-class test labels (structural limitation of n=287).
 
 ### Baseline Classifiers (`src/phase2/baselines.py`)
 
@@ -479,7 +495,7 @@ pass values down without hard-coded constants in the source.
 | `smote`     | `k_neighbors=5`, `random_state=42`                                      |
 | `baselines` | `lr_C_range=[0.01,0.1,1,10]`, `fnn_hidden=[64,32]`                     |
 | `evaluation`| `cF_grid=[1,2,5]`, `cD_grid=[1,3,5,10]`, `epsilon=1`, `Tmax_fraction=0.20` |
-| `monte_carlo`| `B=200`, synthetic series parameters                                   |
+| `monte_carlo`| `B=200`; synthetic series parameters are now per-dataset calibrated at runtime (config values serve as fallback defaults only) |
 | `visualization` | `dpi=300`, `figure_format="pdf"`                                    |
 | `hypersensitive_cpd` | `bocpd_threshold=0.5`, `cusum_h_multiplier=1.0`, `relabel_tolerance_window=10` |
 | `bocpd`     | `threshold=0.3`, `tolerance_fraction=0.02`, `kappa_prior=0.1`, `alpha_prior=1.0` |
@@ -637,6 +653,7 @@ results/figures/
 
 ```
 results/tables/
+├── monte_carlo_config.csv                 # per-dataset MC calibration parameters
 ├── {ds}_bic_sweep.csv
 ├── {ds}_phase1_detector_comparison.csv
 ├── {ds}_tail_diagnostics_train.csv
