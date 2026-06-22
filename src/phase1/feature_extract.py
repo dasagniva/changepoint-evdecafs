@@ -1,8 +1,8 @@
 """Feature extraction from detected changepoints (Algorithm 2).
 
-Extracts a 4-dimensional feature vector for each detected changepoint,
-capturing the magnitude, persistence, local AR(1) coefficient, and
-variance ratio of the shift.
+Extracts a 4- or 5-dimensional feature vector for each detected changepoint,
+capturing the magnitude, persistence, local AR(1) coefficient, variance ratio,
+and (optionally) local EVT shape parameter xi.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ def extract_features(
     means: np.ndarray,
     L: int = 5,
     epsilon: float | None = None,
+    xi_field: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[str]]:
     """Extract a feature matrix for all detected changepoints (Algorithm 2).
 
@@ -34,6 +35,9 @@ def extract_features(
     - ``phi_local`` : local AR(1) residual coefficient estimated from the
       post-change window residuals ``r_t = y_t - mu_t``.
     - ``V`` (variance ratio) : ``var(D_minus) / (var(D_plus) + 1e-10)``.
+    - ``xi_local`` (optional, 5th feature) : mean ``|xi|`` over a window of
+      half-width ``L`` centred on ``tau``.  Only included when ``xi_field``
+      is provided.
 
     Parameters
     ----------
@@ -49,13 +53,17 @@ def extract_features(
     epsilon:
         Persistence tolerance.  If ``None``, computed as
         ``median(|y - means|)`` over the full series.
+    xi_field:
+        EVI (extreme value index) field, shape ``(n,)``.  When provided, a
+        5th feature ``xi_local = mean(|xi_field[tau-L : tau+L+1]|)`` is
+        appended to each feature vector.
 
     Returns
     -------
-    X : np.ndarray, shape ``(m, 4)``
-        Feature matrix.  Columns: [delta_mu, S, phi_local, V].
+    X : np.ndarray, shape ``(m, 4)`` or ``(m, 5)``
+        Feature matrix.
     feature_names : list[str]
-        Column labels ``['delta_mu', 'S', 'phi_local', 'V']``.
+        Column labels.
     """
     y = np.asarray(y, dtype=float)
     means = np.asarray(means, dtype=float)
@@ -68,7 +76,8 @@ def extract_features(
         if epsilon < 1e-10:
             epsilon = 1e-10
 
-    X = np.empty((m, 4), dtype=float)
+    n_features = 5 if xi_field is not None else 4
+    X = np.empty((m, n_features), dtype=float)
 
     for i, tau in enumerate(changepoints):
         # Pre-change window D_minus = y[tau-L : tau]
@@ -108,7 +117,20 @@ def extract_features(
         var_plus = float(np.var(D_plus)) if len(D_plus) > 1 else 0.0
         V = var_minus / (var_plus + 1e-10)
 
-        X[i] = [delta_mu, S, phi_local, V]
+        row = [delta_mu, S, phi_local, V]
+
+        # --- xi_local (5th feature, optional) ---
+        if xi_field is not None:
+            window_start = max(0, tau - L)
+            window_end = min(len(xi_field), tau + L + 1)
+            xi_local = float(np.mean(np.abs(xi_field[window_start:window_end])))
+            row.append(xi_local)
+
+        X[i] = row
+
+    feature_names = ["delta_mu", "S", "phi_local", "V"]
+    if xi_field is not None:
+        feature_names.append("xi_local")
 
     logger.info(
         "Feature extraction — %d changepoints, shape=%s, "
@@ -120,4 +142,4 @@ def extract_features(
         X[:, 1].mean() if m > 0 else 0,
         epsilon,
     )
-    return X, FEATURE_NAMES
+    return X, feature_names

@@ -260,3 +260,121 @@ class TestBalanceTrainingData:
         X1, _ = balance_training_data(X, y, random_state=1)
         X2, _ = balance_training_data(X, y, random_state=2)
         assert not np.allclose(X1, X2)
+
+
+# ---------------------------------------------------------------------------
+# relabel_with_hypersensitive (Change 3 / Change 7b)
+# ---------------------------------------------------------------------------
+
+class TestRelabelWithHypersensitive:
+    """Unit tests for the 4-class X-algorithm relabelling."""
+
+    def setup_method(self):
+        from src.phase2.labelling import relabel_with_hypersensitive
+        self.relabel = relabel_with_hypersensitive
+
+    def _make_flags(self, n, flag_positions):
+        """Create a boolean flags array of length n with True at given positions."""
+        flags = np.zeros(n, dtype=bool)
+        for p in flag_positions:
+            flags[p] = True
+        return flags
+
+    def test_x_hit_and_true_hit_gives_sustained(self):
+        """x_hit + true_hit → Sustained."""
+        flags = self._make_flags(100, [50])
+        labels = self.relabel(
+            cp_indices=np.array([50]),
+            x_flags=flags,
+            true_cp_indices=np.array([50]),
+            existing_labels=np.array([0]),
+            tolerance=5,
+        )
+        assert labels[0] == "Sustained"
+
+    def test_x_hit_no_true_hit_gives_abrupt(self):
+        """x_hit + no true_hit → Abrupt."""
+        flags = self._make_flags(100, [50])
+        labels = self.relabel(
+            cp_indices=np.array([50]),
+            x_flags=flags,
+            true_cp_indices=np.array([80]),  # far away
+            existing_labels=np.array([1]),
+            tolerance=5,
+        )
+        assert labels[0] == "Abrupt"
+
+    def test_no_x_hit_true_hit_gives_abrupt_preceded(self):
+        """no x_hit + true_hit → Abrupt-Preceded."""
+        flags = self._make_flags(100, [80])   # flag far from CP
+        labels = self.relabel(
+            cp_indices=np.array([50]),
+            x_flags=flags,
+            true_cp_indices=np.array([50]),
+            existing_labels=np.array([1]),
+            tolerance=5,
+        )
+        assert labels[0] == "Abrupt-Preceded"
+
+    def test_no_x_hit_no_true_hit_keeps_existing(self):
+        """no x_hit + no true_hit → keep existing label."""
+        flags = self._make_flags(100, [80])
+        existing = np.array([0])
+        labels = self.relabel(
+            cp_indices=np.array([50]),
+            x_flags=flags,
+            true_cp_indices=np.array([20]),   # far
+            existing_labels=existing,
+            tolerance=5,
+        )
+        assert labels[0] == "Recoiled"   # existing 0 → "Recoiled"
+
+    def test_no_label_mode_empty_true_cps(self):
+        """No-label mode (empty true_cp_indices): only x_hit drives label."""
+        flags = self._make_flags(100, [50])
+        labels = self.relabel(
+            cp_indices=np.array([50]),
+            x_flags=flags,
+            true_cp_indices=np.array([]),
+            existing_labels=np.array([1]),
+            tolerance=5,
+        )
+        # x_hit=True, true_hit=False → Abrupt
+        assert labels[0] == "Abrupt"
+
+    def test_no_label_mode_none_true_cps(self):
+        """No-label mode (None true_cp_indices): only x_hit drives label."""
+        flags = self._make_flags(100, [])  # no x flags either
+        labels = self.relabel(
+            cp_indices=np.array([50]),
+            x_flags=flags,
+            true_cp_indices=None,
+            existing_labels=np.array([1]),
+            tolerance=5,
+        )
+        # x_hit=False, true_hit=False → keep existing (1 → "Sustained")
+        assert labels[0] == "Sustained"
+
+    def test_output_length_matches_input(self):
+        """Output length must equal number of CPs."""
+        flags = self._make_flags(200, [30, 70, 120])
+        labels = self.relabel(
+            cp_indices=np.array([30, 70, 120]),
+            x_flags=flags,
+            true_cp_indices=np.array([30, 70]),
+            existing_labels=np.array([1, 0, 1]),
+            tolerance=5,
+        )
+        assert len(labels) == 3
+
+    def test_tolerance_window(self):
+        """x_flag at position 45 should hit CP at 50 with tolerance=10."""
+        flags = self._make_flags(100, [45])
+        labels = self.relabel(
+            cp_indices=np.array([50]),
+            x_flags=flags,
+            true_cp_indices=np.array([]),
+            existing_labels=np.array([0]),
+            tolerance=10,
+        )
+        assert labels[0] == "Abrupt"  # x_hit=True (within 10), true_hit=False

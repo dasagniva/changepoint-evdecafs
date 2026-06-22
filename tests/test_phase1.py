@@ -135,10 +135,12 @@ class TestComputeAdaptivePenalty:
         alpha = compute_adaptive_penalty(xi, alpha_0=5.0, lambda_ev=1.0)
         assert np.all(alpha >= 5.0)
 
-    def test_negative_xi_gives_alpha_0(self):
+    def test_negative_xi_increases_penalty(self):
+        # With |xi|, negative xi now raises penalty (both directions of tail
+        # irregularity are captured)
         xi = np.full(50, -1.0)
         alpha = compute_adaptive_penalty(xi, alpha_0=3.0, lambda_ev=2.0)
-        np.testing.assert_allclose(alpha, 3.0)
+        np.testing.assert_allclose(alpha, 3.0 * (1 + 2.0 * 1.0))
 
     def test_positive_xi_increases_penalty(self):
         xi = np.full(10, 0.5)
@@ -242,3 +244,93 @@ class TestEvDecafs:
         # Means should not wildly extrapolate (grid is min-2std to max+2std)
         assert result["means"].min() >= y.min() - 3 * np.std(y)
         assert result["means"].max() <= y.max() + 3 * np.std(y)
+
+
+# ---------------------------------------------------------------------------
+# BOCPD and CUSUM detectors (Change 2 / Change 7a)
+# ---------------------------------------------------------------------------
+
+class TestBOCPD:
+    """Unit tests for run_bocpd."""
+
+    def test_returns_bool_array_same_length(self):
+        from src.phase1.hypersensitive_cpd import run_bocpd
+        y = _ar1_series(100)
+        flags = run_bocpd(y, phi=0.5, sigma_v=1.0)
+        assert flags.dtype == bool
+        assert len(flags) == 100
+
+    def test_step_change_produces_flags(self):
+        """A large step change should trigger at least one BOCPD flag."""
+        from src.phase1.hypersensitive_cpd import run_bocpd
+        rng = np.random.default_rng(42)
+        y = np.concatenate([rng.normal(0, 0.5, 50), rng.normal(10, 0.5, 50)])
+        flags = run_bocpd(y, phi=0.0, sigma_v=0.5, threshold=0.3)
+        assert flags.any(), "Expected at least one BOCPD flag on step-change series"
+
+    def test_constant_series_low_flags(self):
+        """A constant series should produce no flags (posterior stays at prior)."""
+        from src.phase1.hypersensitive_cpd import run_bocpd
+        y = np.ones(100)
+        flags = run_bocpd(y, phi=0.0, sigma_v=1.0, threshold=0.9)
+        assert not flags.any(), "Constant series should not trigger BOCPD"
+
+    def test_short_series(self):
+        """Series of length 1 should return all-False flags."""
+        from src.phase1.hypersensitive_cpd import run_bocpd
+        y = np.array([1.0])
+        flags = run_bocpd(y, phi=0.0, sigma_v=1.0)
+        assert not flags.any()
+
+    def test_threshold_effect(self):
+        """Higher threshold should produce fewer (or equal) flags."""
+        from src.phase1.hypersensitive_cpd import run_bocpd
+        rng = np.random.default_rng(7)
+        y = np.concatenate([rng.normal(0, 1, 60), rng.normal(5, 1, 60)])
+        flags_low = run_bocpd(y, phi=0.0, sigma_v=1.0, threshold=0.1)
+        flags_high = run_bocpd(y, phi=0.0, sigma_v=1.0, threshold=0.9)
+        assert flags_low.sum() >= flags_high.sum()
+
+
+class TestCUSUM:
+    """Unit tests for run_cusum."""
+
+    def test_returns_bool_array_same_length(self):
+        from src.phase1.hypersensitive_cpd import run_cusum
+        y = _ar1_series(100)
+        flags = run_cusum(y, phi=0.5, sigma_v=1.0)
+        assert flags.dtype == bool
+        assert len(flags) == 100
+
+    def test_step_change_produces_flags(self):
+        """A large step change should trigger CUSUM flags."""
+        from src.phase1.hypersensitive_cpd import run_cusum
+        rng = np.random.default_rng(42)
+        y = np.concatenate([rng.normal(0, 0.2, 50), rng.normal(10, 0.2, 50)])
+        flags = run_cusum(y, phi=0.0, sigma_v=0.2, h_multiplier=1.0)
+        assert flags.any(), "Expected CUSUM flags on step-change series"
+
+    def test_constant_series_no_flags(self):
+        """A perfectly constant series should produce no CUSUM flags."""
+        from src.phase1.hypersensitive_cpd import run_cusum
+        y = np.zeros(200)
+        flags = run_cusum(y, phi=0.0, sigma_v=1.0)
+        assert not flags.any()
+
+    def test_short_series(self):
+        """Series of length 1 should return all-False flags."""
+        from src.phase1.hypersensitive_cpd import run_cusum
+        y = np.array([5.0])
+        flags = run_cusum(y, phi=0.0, sigma_v=1.0)
+        assert not flags.any()
+
+    def test_higher_h_fewer_flags(self):
+        """A stricter control limit should produce fewer or equal flags."""
+        from src.phase1.hypersensitive_cpd import run_cusum
+        rng = np.random.default_rng(13)
+        y = rng.normal(0, 1, 300)
+        # Inject a shift
+        y[150:] += 3.0
+        flags_sens = run_cusum(y, phi=0.0, sigma_v=1.0, h_multiplier=0.5)
+        flags_cons = run_cusum(y, phi=0.0, sigma_v=1.0, h_multiplier=5.0)
+        assert flags_sens.sum() >= flags_cons.sum()

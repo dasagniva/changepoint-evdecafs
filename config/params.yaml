@@ -7,7 +7,20 @@
 # Phase I: EV-DeCAFS Detection
 # -----------------------------------------------------------------------------
 phase1:
-  # Base penalty for the DeCAFS cost function (alpha_0 in the paper)
+  # Base penalty mode: "bic" uses C*log(n); "fixed" uses alpha_0 below
+  alpha_0_mode: "bic"
+
+  # BIC multiplier C: alpha_0 = C * log(n_train)
+  # Sweep below finds the C that gives ~expected_n_changepoints detections
+  bic_multiplier: 2.0
+
+  # Whether to sweep C values and auto-select (runs once per dataset)
+  tune_bic: true
+
+  # C values to try in the sweep
+  bic_sweep_values: [0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 10.0, 20.0]
+
+  # Fallback fixed base penalty (used when alpha_0_mode = "fixed")
   alpha_0: 10.0
 
   # Precision of the level process: lambda = 1 / sigma_eta^2
@@ -22,7 +35,7 @@ phase1:
   window_halfwidth_w: 50
 
   # Sensitivity multiplier for the EVT adaptive penalty
-  # alpha_t = alpha_0 * (1 + lambda_ev * max(xi_t, 0))
+  # alpha_t = alpha_0 * (1 + lambda_ev * |xi_t|)
   evt_sensitivity_lambda_ev: 1.0
 
   # Quantile used to threshold local deviations before GPD fit
@@ -31,6 +44,11 @@ phase1:
   # Multiplier for exceedance-count penalty variant
   # alpha_t = alpha_0 * (1 + E_t / (2w+1)) * c
   exceedance_multiplier_c: 2.5
+
+  # Regularization for sigma_eta^2 estimation:
+  # sigma_eta^2 >= sigma_eta_regularization_epsilon * sigma_v^2
+  # Prevents degeneracy when phi is near the unit root.
+  sigma_eta_regularization_epsilon: 0.001
 
 # -----------------------------------------------------------------------------
 # Phase I → Phase II: Labelling
@@ -84,6 +102,12 @@ baselines:
   fnn_dropout: 0.3       # approximated via alpha regularisation in sklearn
   fnn_epochs: 100        # maps to max_iter
 
+  # GRU (RNN) classifier
+  gru_hidden_dim: 32
+  gru_dropout: 0.3
+  gru_epochs: 100
+  gru_lr: 0.001
+
 # -----------------------------------------------------------------------------
 # Evaluation
 # -----------------------------------------------------------------------------
@@ -100,13 +124,87 @@ evaluation:
   # is considered a 'near-miss' rather than a false positive
   hausdorff_tolerance_fraction: 0.02
 
+  # Expected number of changepoints (used by BIC sweep auto-selector)
+  expected_n_changepoints: 12
+
+  # Boundary exclusion: detected CPs within this many obs of the test-set start
+  # are excluded from FP counting (boundary artifact suppression)
+  boundary_exclusion_window: 50
+
 # -----------------------------------------------------------------------------
-# Train/test splitting
+# Monte Carlo coverage simulation
+# -----------------------------------------------------------------------------
+monte_carlo:
+  B: 200                    # number of synthetic replications
+  series_n: 2000            # length of each synthetic series
+  n_changepoints: 8         # sustained changepoints per series
+  n_outliers: 15            # outlier spikes per series
+  phi: 0.5                  # AR(1) phi for synthetic data
+  sigma_v: 2000.0           # AR(1) noise std for synthetic data
+  seed: 42                  # base random seed
+
+# -----------------------------------------------------------------------------
+# Dataset configuration
+# All pipeline datasets are listed here; run with --dataset all to run all.
+# -----------------------------------------------------------------------------
+datasets:
+  - name: welllog
+    type: local
+    train_fraction: 0.75
+    expected_n_changepoints: 12   # overrides evaluation.expected_n_changepoints
+  - name: oilwell
+    type: local
+    train_fraction: 0.75
+    expected_n_changepoints: 8
+  - name: us_ip_growth
+    type: fred
+    train_fraction: 0.80
+    expected_n_changepoints: 8
+    fred_series_id: "INDPRO"
+    start_date: "2000-01-01"
+    end_date: "2026-01-01"
+    train_end_date: "2023-12-01"
+
+# -----------------------------------------------------------------------------
+# Hypersensitive CPD (BOCPD + CUSUM for X-algorithm relabelling)
+# -----------------------------------------------------------------------------
+hypersensitive_cpd:
+  # BOCPD: flag index t if posterior CP probability > threshold
+  bocpd_threshold: 0.5
+
+  # CUSUM: control limit h = cusum_h_multiplier * sigma_v  (1-sigma = hypersensitive)
+  cusum_h_multiplier: 1.0
+
+  # Relabelling tolerance: CP is considered 'near' if within ±window obs
+  relabel_tolerance_window: 10
+
+# -----------------------------------------------------------------------------
+# BOCPD labelling oracle (Phase II primary labelling, Change 3)
+# Uses src.phase2.bocpd_labeller + src.phase1.hypersensitive_cpd
+# Recalibrated for WSL2 / 23 GB RAM: hazard rate is adaptive (1/n), not fixed.
+# -----------------------------------------------------------------------------
+bocpd:
+  # Posterior CP probability threshold (lower = more sensitive / more detections)
+  threshold: 0.3
+
+  # Matching window as a fraction of series length: int(tolerance_fraction * n)
+  tolerance_fraction: 0.02
+
+  # Normal-Inverse-Gamma prior hyperparameters (used by bocpd_labeller.run_bocpd)
+  kappa_prior: 0.1
+  alpha_prior: 1.0
+
+# -----------------------------------------------------------------------------
+# Per-dataset overrides
+# -----------------------------------------------------------------------------
+oilwell:
+  # Minimum segment duration; shorter segments are overridden to "Recoiled"
+  min_segment_length: 50
+
+# -----------------------------------------------------------------------------
+# Train/test splitting (legacy; used by MC and loader defaults)
 # -----------------------------------------------------------------------------
 splitting:
-  # Bitcoin: inclusive end date of the training period
-  bitcoin_train_end: "2022-12-31"
-
   # Well-log: fraction of observations used for training (chronological)
   welllog_train_fraction: 0.75
 

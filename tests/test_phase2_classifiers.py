@@ -227,7 +227,7 @@ DUMMY_PARAMS = {
 class TestGetBaselines:
     def test_returns_four_classifiers(self):
         b = get_baselines(DUMMY_PARAMS)
-        assert len(b) == 4
+        assert len(b) == 5  # LR, IF, OC-SVM, FNN, GRU
 
     def test_expected_keys(self):
         b = get_baselines(DUMMY_PARAMS)
